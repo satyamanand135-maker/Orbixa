@@ -21,9 +21,14 @@ import { complianceRouter, enforceRetentionPolicies, assertAuditLogImmutability 
 import { OAUTH_CONFIG, OAuthProvider, exchangeCodeForToken, generateAuthorizationUrl } from "./server-oauth.ts";
 
 // Load secrets from configured provider (AWS SM, Azure KV, Vault, or .env)
-await loadSecrets();
-
+// Load environment variables first
 dotenv.config();
+
+// Load secrets asynchronously without top-level await
+loadSecrets().catch((err) => {
+  console.error("Failed to load secrets:", err);
+  process.exit(1);
+});
 
 export const app = express();
 const PORT = 3000;

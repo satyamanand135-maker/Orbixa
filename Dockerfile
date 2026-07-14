@@ -7,15 +7,17 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci --only=production && \
+RUN npm ci && \
     npm cache clean --force
 
 # Build TypeScript
-COPY tsconfig.json ./
-COPY src ./src
-COPY server.ts ./
-COPY server-*.ts ./
-COPY index.html ./
+# COPY tsconfig.json ./
+# COPY src ./src
+# COPY server.ts ./
+# COPY server-*.ts ./
+# COPY index.html ./
+
+COPY . .
 
 RUN npm run build
 
@@ -54,4 +56,6 @@ EXPOSE 3000
 ENTRYPOINT ["dumb-init", "--"]
 
 # Start application
-CMD ["node", "dist/server.js"]
+# CMD ["node", "dist/server.js"]
+
+CMD ["node", "dist/server.cjs"]
