@@ -1,5 +1,5 @@
 # Multi-stage build for Node.js Express application
-FROM node:20-alpine as builder
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -7,8 +7,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci && \
-    npm cache clean --force
+RUN npm ci && npm cache clean --force
 
 # Build TypeScript
 # COPY tsconfig.json ./
@@ -32,8 +31,6 @@ RUN apk add --no-cache dumb-init
 # Copy from builder
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/index.html ./index.html
-COPY --from=builder /app/assets ./assets
 
 # Copy config files
 COPY package.json ./
