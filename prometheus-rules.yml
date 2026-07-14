@@ -1,0 +1,97 @@
+---
+# prometheus-rules.yml — DHub production alert rules
+# Load this with: --web.enable-lifecycle and reference in prometheus.yml rule_files section
+
+groups:
+  - name: dhub_queue_alerts
+    interval: 30s
+    rules:
+      # Alert if any queue has more than 100 waiting jobs for 5+ minutes
+      - alert: DHubQueueDepthHigh
+        expr: dhub_queue_depth > 100
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "DHub queue {{ $labels.queue }} has high depth ({{ $value }} jobs)"
+          description: "Queue {{ $labels.queue }} has been above 100 waiting jobs for 5 minutes. This may indicate worker lag or a stuck processor."
+          runbook: "https://internal/runbooks/dhub-queue-depth"
+
+      # Alert if queue is completely jammed
+      - alert: DHubQueueDepthCritical
+        expr: dhub_queue_depth > 500
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "DHub queue {{ $labels.queue }} is critically backed up ({{ $value }} jobs)"
+          description: "Immediate action needed. Queue {{ $labels.queue }} has > 500 pending jobs."
+
+  - name: dhub_job_performance
+    interval: 60s
+    rules:
+      # Alert if average job duration exceeds 30 seconds
+      - alert: DHubJobSlowP95
+        expr: dhub_job_duration_ms_avg > 30000
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "DHub queue {{ $labels.queue }} average job duration is {{ $value | humanizeDuration }}"
+          description: "Jobs in {{ $labels.queue }} are taking longer than 30 seconds on average. Check Python sidecar or LLM API latency."
+
+      # Alert on sustained job failure rate
+      - alert: DHubJobFailureRateHigh
+        expr: |
+          rate(dhub_job_total{status="failed"}[5m]) /
+          (rate(dhub_job_total{status="completed"}[5m]) + rate(dhub_job_total{status="failed"}[5m]) + 0.001)
+          > 0.10
+        for: 3m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "DHub {{ $labels.queue }} job failure rate is {{ $value | humanizePercentage }}"
+          description: "More than 10% of jobs in {{ $labels.queue }} are failing. Check worker logs."
+
+  - name: dhub_api_health
+    interval: 30s
+    rules:
+      # Alert on high HTTP error rate
+      - alert: DHubHttpErrorRateHigh
+        expr: |
+          rate(dhub_http_requests_total{status=~"5.."}[5m]) /
+          rate(dhub_http_requests_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "DHub HTTP 5xx error rate is {{ $value | humanizePercentage }}"
+          description: "More than 5% of HTTP requests are returning 5xx errors."
+
+      # Alert if process goes down
+      - alert: DHubProcessDown
+        expr: absent(dhub_process_uptime_seconds)
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+          page: "true"
+        annotations:
+          summary: "DHub API process is down"
+          description: "No heartbeat received from dhub-api for 1 minute."
+
+      # Alert on high error capture rate
+      - alert: DHubApplicationErrorsHigh
+        expr: rate(dhub_errors_total[5m]) > 0.05
+        for: 3m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "DHub application error rate is elevated ({{ $value | humanize }}/s on {{ $labels.route }})"
+          description: "Route {{ $labels.route }} is generating application errors at > 0.05/sec."

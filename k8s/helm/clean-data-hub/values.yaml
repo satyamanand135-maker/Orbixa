@@ -1,0 +1,53 @@
+# Helm values configuration for Clean Data Hub
+
+replicaCount:
+  server: 2
+  worker: 3
+
+image:
+  repository: clean-data-hub
+  tag: "1.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+env:
+  NODE_ENV: production
+  PORT: "3000"
+  MONGODB_URI: ""         # Injected via Kubernetes Secret: clean-data-hub-secrets
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  PII_DETECTION_ENABLED: "true"
+  PII_REDACTION_ENABLED: "true"
+  VECTOR_DB_TYPE: "qdrant"
+  QDRANT_URL: "http://qdrant-service:6333"
+  QDRANT_COLLECTION: "documents"
+  # Secrets (JWT_SECRET, SESSION_SECRET, ENCRYPTION_KEY, GEMINI_API_KEY, REDIS_PASSWORD, MONGODB_URI)
+  # are injected from the Kubernetes Secret 'clean-data-hub-secrets' via secretKeyRef in deployment.yaml.
+  # NEVER add secrets to this file. Use: kubectl create secret or your CI/CD vault.
+
+
+resources:
+  server:
+    limits:
+      cpu: 1000m
+      memory: 1024Mi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+  worker:
+    limits:
+      cpu: 2000m
+      memory: 2048Mi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80

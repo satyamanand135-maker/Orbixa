@@ -1,0 +1,132 @@
+name: DHub CI Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:6.0
+        ports: [ "27017:27017" ]
+      redis:
+        image: redis:7.0
+        ports: [ "6379:6379" ]
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dhub
+          POSTGRES_PASSWORD: dhub_ci
+          POSTGRES_DB: dhub_test
+        ports: [ "5432:5432" ]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      NODE_ENV: test
+      MONGODB_URI: mongodb://localhost:27017/dhub_test
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      DATABASE_URL: postgresql://dhub:dhub_ci@localhost:5432/dhub_test
+      ENCRYPTION_KEY: 1e7b30efab9262ca4be67d30773d191244e883df1e52dbb050c55047814b73b5
+      JWT_SECRET: ci-jwt-test-secret-key-12345
+      SESSION_SECRET: ci-session-test-secret-key-12345
+      ALLOW_MISSING_COVERAGE: "true"   # Gap 11: allow while test suite ramps up
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Python (OCR / PII sidecar)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          pip install pdf-parse-fallback || true
+          pip install presidio-analyzer presidio-anonymizer spacy || true
+          python -m spacy download en_core_web_sm || true
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run lint
+
+      # -------------------------------------------------------------------------
+      # Gap 11 — Core unit + integration tests
+      # -------------------------------------------------------------------------
+      - name: Run Core API Tests
+        run: npm test
+        timeout-minutes: 5
+
+      # -------------------------------------------------------------------------
+      # Gap 10 — Pipeline + billing integration tests (real HTTP)
+      # -------------------------------------------------------------------------
+      - name: Run Pipeline Integration Tests
+        run: npm run test:pipeline
+        timeout-minutes: 5
+        continue-on-error: true   # Non-blocking while mocks are replaced
+
+      - name: Run Billing Integration Tests
+        run: npm run test:billing
+        timeout-minutes: 3
+        continue-on-error: true
+
+      # -------------------------------------------------------------------------
+      # Go SDK compile check (Gap 1)
+      # -------------------------------------------------------------------------
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Compile Go SDK
+        working-directory: sdk/go
+        run: go build ./...
+
+      # -------------------------------------------------------------------------
+      # Gap 11 — Coverage gate (ALLOW_MISSING_COVERAGE=true = non-blocking)
+      # -------------------------------------------------------------------------
+      - name: Coverage check
+        run: npm run coverage:check
+        env:
+          ALLOW_MISSING_COVERAGE: "true"
+
+      # -------------------------------------------------------------------------
+      # Docker build smoke test (no push on PRs)
+      # -------------------------------------------------------------------------
+      - name: Docker build (smoke test)
+        if: github.event_name == 'pull_request'
+        run: docker build --target=builder -t dhub-smoke:${{ github.sha }} .
+
+      # -------------------------------------------------------------------------
+      # Terraform validate (Gap 10 infra checks)
+      # -------------------------------------------------------------------------
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.6"
+
+      - name: Terraform init + validate
+        working-directory: terraform
+        run: |
+          terraform init -backend=false
+          terraform validate

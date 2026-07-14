@@ -1,0 +1,160 @@
+###############################################################################
+# k8s/keda-scaledobjects.yaml — KEDA queue-depth autoscaling (Gap 5)
+#
+# Replaces CPU-based HPA with queue-depth-based autoscaling.
+# Each ScaledObject watches a Redis list length and scales the corresponding
+# worker deployment from 0 replicas (scale-to-zero) up to maxReplicas.
+#
+# Prerequisites:
+#   kubectl apply -f https://github.com/kedacore/keda/releases/download/v2.14.0/keda-2.14.0.yaml
+#
+# Apply:
+#   kubectl apply -f k8s/keda-scaledobjects.yaml
+###############################################################################
+
+---
+# ---------------------------------------------------------------------------
+# TriggerAuthentication — Redis credentials from Kubernetes secret
+# ---------------------------------------------------------------------------
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: dhub-redis-auth
+  namespace: dhub-production
+spec:
+  secretTargetRef:
+    - parameter: address
+      name: dhub-redis-secret
+      key: REDIS_URL
+
+---
+# ---------------------------------------------------------------------------
+# ScaledObject — Document Refine Queue
+# ---------------------------------------------------------------------------
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: dhub-document-refine-scaler
+  namespace: dhub-production
+  annotations:
+    scaledobject.keda.sh/transfer-hpa-ownership: "true"
+spec:
+  scaleTargetRef:
+    name: dhub-worker-refine        # Deployment name for refine workers
+  pollingInterval: 15               # Check queue depth every 15 seconds
+  cooldownPeriod:  120              # Wait 2 minutes before scaling down
+  minReplicaCount: 0                # Scale to zero when queue is empty
+  maxReplicaCount: 20               # Up to 20 workers at peak load
+  advanced:
+    restoreToOriginalReplicaCount: false
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0     # Scale up immediately
+          policies:
+            - type:          Pods
+              value:         4              # Add up to 4 pods per interval
+              periodSeconds: 15
+        scaleDown:
+          stabilizationWindowSeconds: 120   # Wait 2 min before scaling down
+          policies:
+            - type:          Pods
+              value:         1             # Remove 1 pod per interval
+              periodSeconds: 30
+  triggers:
+    - type: redis
+      authenticationRef:
+        name: dhub-redis-auth
+      metadata:
+        address: ""                  # Filled from TriggerAuthentication
+        listName: "bull:document-refine-queue:wait"
+        listLength: "5"              # 1 worker per 5 waiting jobs
+        activationListLength: "1"    # Wake up from 0 when ≥1 job
+
+---
+# ---------------------------------------------------------------------------
+# ScaledObject — PII Detection Queue
+# ---------------------------------------------------------------------------
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: dhub-pii-detection-scaler
+  namespace: dhub-production
+spec:
+  scaleTargetRef:
+    name: dhub-worker-pii
+  pollingInterval: 15
+  cooldownPeriod:  90
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  triggers:
+    - type: redis
+      authenticationRef:
+        name: dhub-redis-auth
+      metadata:
+        listName: "bull:pii-detection-queue:wait"
+        listLength: "3"
+        activationListLength: "1"
+
+---
+# ---------------------------------------------------------------------------
+# ScaledObject — Embedding Queue
+# ---------------------------------------------------------------------------
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: dhub-embedding-scaler
+  namespace: dhub-production
+spec:
+  scaleTargetRef:
+    name: dhub-worker-embedding
+  pollingInterval: 15
+  cooldownPeriod:  180
+  minReplicaCount: 0
+  maxReplicaCount: 15
+  triggers:
+    - type: redis
+      authenticationRef:
+        name: dhub-redis-auth
+      metadata:
+        listName: "bull:embedding-queue:wait"
+        listLength: "10"
+        activationListLength: "1"
+
+---
+# ---------------------------------------------------------------------------
+# ScaledObject — Connector Sync Queue
+# ---------------------------------------------------------------------------
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: dhub-connector-sync-scaler
+  namespace: dhub-production
+spec:
+  scaleTargetRef:
+    name: dhub-worker-connectors
+  pollingInterval: 30
+  cooldownPeriod:  300
+  minReplicaCount: 0
+  maxReplicaCount: 5
+  triggers:
+    - type: redis
+      authenticationRef:
+        name: dhub-redis-auth
+      metadata:
+        listName: "bull:connector-sync-queue:wait"
+        listLength: "2"
+        activationListLength: "1"
+
+---
+# ---------------------------------------------------------------------------
+# Secret — Redis connection string (populate with your actual Redis URL)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dhub-redis-secret
+  namespace: dhub-production
+type: Opaque
+stringData:
+  REDIS_URL: "rediss://dhub-redis:6379"  # Replace with real Redis endpoint

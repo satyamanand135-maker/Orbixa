@@ -1,0 +1,221 @@
+name: DHub CD — Build, Push & Deploy
+
+on:
+  push:
+    branches: [ main ]
+
+# Only run CD after CI passes (avoids deploying broken code)
+# Uses GitHub's job dependency and branch protection rules
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Phase 1: Run full CI suite (mirrors ci.yml but scoped to CD trigger)
+  # -------------------------------------------------------------------------
+  ci-check:
+    name: CI Gate
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:6.0
+        ports: [ "27017:27017" ]
+      redis:
+        image: redis:7.0
+        ports: [ "6379:6379" ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+        env:
+          NODE_ENV: test
+          MONGODB_URI: mongodb://localhost:27017/dhub_test
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+          ENCRYPTION_KEY: 1e7b30efab9262ca4be67d30773d191244e883df1e52dbb050c55047814b73b5
+          JWT_SECRET: ci-jwt-test-secret-key-12345
+          SESSION_SECRET: ci-session-test-secret-key-12345
+
+  # -------------------------------------------------------------------------
+  # Phase 2: Build Docker image and push to GitHub Container Registry
+  # -------------------------------------------------------------------------
+  build-and-push:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: ci-check
+    permissions:
+      contents: read
+      packages: write       # Required to push to GHCR
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+      image_digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+
+  # -------------------------------------------------------------------------
+  # Phase 3: Deploy to Kubernetes (staging)
+  # -------------------------------------------------------------------------
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment:
+      name: staging
+      url: https://staging.dhub.example.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: v1.29.0
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG_STAGING }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Deploy to staging namespace
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+        run: |
+          kubectl set image deployment/dhub-api \
+            dhub-api=$IMAGE \
+            -n dhub-staging
+          kubectl rollout status deployment/dhub-api -n dhub-staging --timeout=5m
+
+      - name: Verify deployment health
+        run: |
+          sleep 10
+          HEALTH=$(kubectl exec -n dhub-staging \
+            $(kubectl get pod -n dhub-staging -l app=dhub-api -o jsonpath='{.items[0].metadata.name}') \
+            -- curl -s http://localhost:3000/api/health | jq -r '.status')
+          echo "Health: $HEALTH"
+          if [ "$HEALTH" != "ok" ]; then
+            echo "Health check failed! Rolling back."
+            kubectl rollout undo deployment/dhub-api -n dhub-staging
+            exit 1
+          fi
+
+  # -------------------------------------------------------------------------
+  # Phase 4: Deploy to Production (requires manual approval via environment)
+  # -------------------------------------------------------------------------
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment:
+      name: production
+      url: https://dhub.example.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: v1.29.0
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG_PRODUCTION }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Deploy to production namespace
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+        run: |
+          kubectl set image deployment/dhub-api \
+            dhub-api=$IMAGE \
+            -n dhub-production
+          kubectl rollout status deployment/dhub-api -n dhub-production --timeout=10m
+
+      - name: Smoke test production
+        run: |
+          sleep 15
+          STATUS=$(curl -sf https://dhub.example.com/api/health | jq -r '.status' || echo "failed")
+          echo "Production health: $STATUS"
+          if [ "$STATUS" != "ok" ]; then
+            echo "Production smoke test FAILED — rolling back"
+            kubectl rollout undo deployment/dhub-api -n dhub-production
+            exit 1
+          fi
+
+  # -------------------------------------------------------------------------
+  # Phase 5: Notify Slack on success/failure
+  # -------------------------------------------------------------------------
+  notify:
+    name: Slack Notification
+    runs-on: ubuntu-latest
+    needs: [ deploy-production ]
+    if: always()
+    steps:
+      - name: Notify success
+        if: needs.deploy-production.result == 'success'
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "text": ":white_check_mark: *DHub deployed successfully* to production\n*SHA:* `${{ github.sha }}`\n*Actor:* ${{ github.actor }}\n*Branch:* `${{ github.ref_name }}`"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: Notify failure
+        if: needs.deploy-production.result != 'success'
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "text": ":x: *DHub deployment FAILED*\n*SHA:* `${{ github.sha }}`\n*Actor:* ${{ github.actor }}\n*Stage:* See GitHub Actions for details"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

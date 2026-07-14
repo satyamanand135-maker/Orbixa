@@ -1,0 +1,56 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-display: "Space Grotesk", sans-serif;
+  
+  --color-brand-50: #f0fdf4;
+  --color-brand-100: #dcfce7;
+  --color-brand-500: #22c55e;
+  --color-brand-600: #16a34a;
+  --color-brand-700: #15803d;
+  
+  /* Professional Polish Theme Custom Colors */
+  --color-[#0a0a0b]: #0A0A0B;
+  --color-[#111113]: #111113;
+  --color-[#18181b]: #18181B;
+  --color-[#27272a]: #27272A;
+  --color-[#e4e4e7]: #E4E4E7;
+  --color-[#a1a1aa]: #A1A1AA;
+  --color-[#3b82f6]: #3B82F6;
+  --color-[#10b981]: #10B981;
+  --color-[#f59e0b]: #F59E0B;
+}
+
+:root {
+  --bg: #0A0A0B;
+  --sidebar: #111113;
+  --card: #18181B;
+  --border: #27272A;
+  --text: #E4E4E7;
+  --text-dim: #A1A1AA;
+  --accent: #3B82F6;
+  --success: #10B981;
+  --warning: #F59E0B;
+}
+
+/* Custom Scrollbar for sleek dark layout matching Professional Polish */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0A0A0B;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272A;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}

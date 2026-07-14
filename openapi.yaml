@@ -1,0 +1,262 @@
+openapi: 3.0.3
+info:
+  title: Clean Data Hub Enterprise Ingestion API
+  version: 1.1.0
+  description: |
+    API specifications for the Clean Data Hub platform. Includes robust document ingestion, 
+    refinement pipelines, structured metadata generation, custom PII redaction gates, 
+    SAML SSO flows, billing checks, and tenant operations.
+servers:
+  - url: http://localhost:3000
+    description: Development Local server
+paths:
+  /api/auth/register:
+    post:
+      summary: Register a new user workspace
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  format: password
+                tenantId:
+                  type: string
+                  description: Optional custom organization ID
+                role:
+                  type: string
+                  enum: [admin, user, viewer]
+                  default: user
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  user:
+                    type: object
+        '400':
+          description: User already exists
+
+  /api/auth/login:
+    post:
+      summary: Sign in local account
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+              properties:
+                email:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  user:
+                    type: object
+        '401':
+          description: Invalid email or password
+
+  /api/auth/saml/login:
+    get:
+      summary: Initiate SAML SSO authentication
+      tags:
+        - Authentication
+      responses:
+        '200':
+          description: SSO Redirection form HTML page
+
+  /api/auth/saml/callback:
+    post:
+      summary: SAML Assertion Callback consumer
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - SAMLResponse
+              properties:
+                SAMLResponse:
+                  type: string
+                  description: Base64 encoded SAML assertion XML
+      responses:
+        '302':
+          description: Redirects to home page with SSO Token parameter
+
+  /api/documents:
+    get:
+      summary: Get all documents
+      tags:
+        - Documents
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Scoped documents list
+    post:
+      summary: Ingest raw text document into pipeline
+      tags:
+        - Documents
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - rawContent
+              properties:
+                name:
+                  type: string
+                rawContent:
+                  type: string
+                type:
+                  type: string
+                  enum: [PDF, DOCX, XLSX, TXT]
+                  default: TXT
+                size:
+                  type: string
+                connector:
+                  type: string
+      responses:
+        '201':
+          description: Created
+
+  /api/documents/{id}/refine:
+    post:
+      summary: Trigger refinery pipeline for ingested document
+      tags:
+        - Refinement
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Job queued
+        '402':
+          description: Quota exceeded (Free tier limit is 5 documents)
+        '404':
+          description: Document not found
+
+  /api/refine-text:
+    post:
+      summary: On-the-fly sandbox text refinement playground
+      tags:
+        - Refinement
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - text
+              properties:
+                text:
+                  type: string
+                name:
+                  type: string
+      responses:
+        '200':
+          description: Refined outputs
+        '402':
+          description: Quota exceeded
+
+  /api/billing/upgrade:
+    post:
+      summary: Upgrade billing tier to enterprise
+      tags:
+        - Billing
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successfully upgraded
+
+  /api/admin/settings:
+    get:
+      summary: Retrieve IP, TTL, and Webhook policies
+      tags:
+        - Admin Panel
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: OK
+    post:
+      summary: Update IP, TTL, and Webhook settings
+      tags:
+        - Admin Panel
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ipAllowlist:
+                  type: array
+                  items:
+                    type: string
+                retentionDays:
+                  type: integer
+                webhookUrl:
+                  type: string
+                webhookSecret:
+                  type: string
+      responses:
+        '200':
+          description: Saved
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: clean-data-hub-server
+  labels:
+    app: clean-data-hub
+    component: server
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    app: clean-data-hub
+    component: server

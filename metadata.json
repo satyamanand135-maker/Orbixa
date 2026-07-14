@@ -1,0 +1,6 @@
+{
+  "name": "Clean Data Hub",
+  "description": "The Automated Data Refinery for Enterprise AI. Connects, parses, cleans, redacts PII, generates metadata, chunks, and syncs enterprise data for RAG and LLMs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

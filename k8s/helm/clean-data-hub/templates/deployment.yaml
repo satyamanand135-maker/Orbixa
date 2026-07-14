@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clean-data-hub-server
+  labels:
+    app: clean-data-hub
+    component: server
+spec:
+  replicas: {{ .Values.replicaCount.server }}
+  selector:
+    matchLabels:
+      app: clean-data-hub
+      component: server
+  template:
+    metadata:
+      labels:
+        app: clean-data-hub
+        component: server
+    spec:
+      containers:
+        - name: server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "server.js"]
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            # ── Non-sensitive config from values.yaml ──────────────────────
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            # ── Sensitive secrets from Kubernetes Secret manifest ──────────
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: clean-data-hub-secrets
+                  key: JWT_SECRET
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: clean-data-hub-secrets
+                  key: SESSION_SECRET
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: clean-data-hub-secrets
+                  key: ENCRYPTION_KEY
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: clean-data-hub-secrets
+                  key: GEMINI_API_KEY
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: clean-data-hub-secrets
+                  key: MONGODB_URI
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clean-data-hub-secrets
+                  key: REDIS_PASSWORD
+
+          resources:
+            {{- toYaml .Values.resources.server | nindent 12 }}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clean-data-hub-worker
+  labels:
+    app: clean-data-hub
+    component: worker
+spec:
+  replicas: {{ .Values.replicaCount.worker }}
+  selector:
+    matchLabels:
+      app: clean-data-hub
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: clean-data-hub
+        component: worker
+    spec:
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "server-jobs.js"]
+          env:
+            # ── Non-sensitive config from values.yaml ──────────────────────
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            # ── Sensitive secrets from Kubernetes Secret manifest ──────────
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: clean-data-hub-secrets
+                  key: JWT_SECRET
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: clean-data-hub-secrets
+                  key: SESSION_SECRET
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: clean-data-hub-secrets
+                  key: ENCRYPTION_KEY
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: clean-data-hub-secrets
+                  key: GEMINI_API_KEY
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: clean-data-hub-secrets
+                  key: MONGODB_URI
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clean-data-hub-secrets
+                  key: REDIS_PASSWORD
+          resources:
+            {{- toYaml .Values.resources.worker | nindent 12 }}
