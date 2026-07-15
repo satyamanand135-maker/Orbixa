@@ -1,4 +1,4 @@
-import jwt from "jsonwebtoken";
+import jwt, { SignOptions } from "jsonwebtoken";
 import { Request, Response, NextFunction } from "express";
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
@@ -21,7 +21,7 @@ declare global {
 }
 
 const JWT_SECRET = process.env.JWT_SECRET || "your-super-secret-key-change-in-production";
-const JWT_EXPIRY = process.env.JWT_EXPIRY || "24h";
+const JWT_EXPIRY = (process.env.JWT_EXPIRY || "24h") as SignOptions["expiresIn"];
 const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || "refresh-secret-change-in-production";
 
 const IS_TEST = process.env.NODE_ENV === "test";

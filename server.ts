@@ -6,19 +6,19 @@ import { GoogleGenAI, Type } from "@google/genai";
 import mongoose from "mongoose";
 import session from "express-session";
 import crypto from "crypto";
-import { Document, Connector, VectorDb, User, AuditLog, Organization } from "./server-db.ts";
-import { setupJobProcessors, closeQueues } from "./server-jobs.ts";
-import { authRedisClient, requireAuth, verifyPassword, hashPassword, generateToken, enforceIpAllowlist, rateLimit } from "./server-auth.ts";
-import { createRedisSessionStore } from "./server-redis-sessions.ts";
-import { createPresignedUpload, saveLocalObject } from "./server-storage.ts";
-import { captureError, registerObservability } from "./server-observability.ts";
-import { samlRouter } from "./server-saml.ts";
-import { billingRouter, registerBillingWebhook } from "./server-billing.ts";
-import { runPgMigrations, pgInsertAuditLog, pgUpsertDocument, pgUpsertOrganization, pgEnabled, pgGetUserByEmail, pgGetUserById, pgUpsertUser, pgGetOrganization, pgGetDocuments, pgGetDocumentById, pgDeleteDocument, pgGetConnectors, pgGetConnectorById, pgUpsertConnector, pgDeleteConnector } from "./server-pg.ts";
+import { Document, Connector, VectorDb, User, AuditLog, Organization } from "./server-db";
+import { setupJobProcessors, closeQueues } from "./server-jobs";
+import { authRedisClient, requireAuth, verifyPassword, hashPassword, generateToken, enforceIpAllowlist, rateLimit } from "./server-auth";
+import { createRedisSessionStore } from "./server-redis-sessions";
+import { createPresignedUpload, saveLocalObject } from "./server-storage";
+import { captureError, registerObservability } from "./server-observability";
+import { samlRouter } from "./server-saml";
+import { billingRouter, registerBillingWebhook } from "./server-billing";
+import { runPgMigrations, pgInsertAuditLog, pgUpsertDocument, pgUpsertOrganization, pgEnabled, pgGetUserByEmail, pgGetUserById, pgUpsertUser, pgGetOrganization, pgGetDocuments, pgGetDocumentById, pgDeleteDocument, pgGetConnectors, pgGetConnectorById, pgUpsertConnector, pgDeleteConnector } from "./server-pg";
 import multer from "multer";
-import { loadSecrets } from "./server-secrets.ts";
-import { complianceRouter, enforceRetentionPolicies, assertAuditLogImmutability } from "./server-compliance.ts";
-import { OAUTH_CONFIG, OAuthProvider, exchangeCodeForToken, generateAuthorizationUrl } from "./server-oauth.ts";
+import { loadSecrets } from "./server-secrets";
+import { complianceRouter, enforceRetentionPolicies, assertAuditLogImmutability } from "./server-compliance";
+import { OAUTH_CONFIG, OAuthProvider, exchangeCodeForToken, generateAuthorizationUrl } from "./server-oauth";
 
 // Load secrets from configured provider (AWS SM, Azure KV, Vault, or .env)
 // Load environment variables first
@@ -33,10 +33,10 @@ loadSecrets().catch((err) => {
 export const app = express();
 const PORT = 3000;
 
+registerBillingWebhook(app); // Must be before express.json() parses the body
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 registerObservability(app);
-registerBillingWebhook(app); // Must be before express.json() parses the body
 
 // Mount SAML SSO router
 app.use("/api/auth/saml", samlRouter);
@@ -476,14 +476,16 @@ function cleanMarkdownWrapper(text: string): string {
 function simulateParsing(text: string): string {
   let parsed = text;
   // Convert HTML tables or lists mock-style
-  parsed = parsed.replace(/<table>([\s\S]*?)<\/table>/g, (match, body) => {
+  parsed = parsed.replace(/<table>([\s\S]*?)<\/table>/g, (_match: string, body: string) => {
     const rows: string[][] = [];
-    body.replace(/<tr>([\s\S]*?)<\/tr>/g, (m, r) => {
+    body.replace(/<tr>([\s\S]*?)<\/tr>/g, (_m: string, rowHtml: string) => {
       const cols: string[] = [];
-      r.replace(/<td>(.*?)<\/td>/g, (m2, c) => {
-        cols.push(c.trim());
+      rowHtml.replace(/<td>(.*?)<\/td>/g, (_m2: string, cellHtml: string) => {
+        cols.push(cellHtml.trim());
+        return "";
       });
       if (cols.length > 0) rows.push(cols);
+      return "";
     });
     if (rows.length === 0) return "";
     let mdTable = "\n";
@@ -1278,7 +1280,7 @@ app.get("/api/health", async (req, res) => {
   }
 
   try {
-    const { authRedisClient } = await import("./server-auth.ts");
+    const { authRedisClient } = await import("./server-auth");
     if (authRedisClient.isOpen) {
       await authRedisClient.ping();
       health.checks.redis = "ok";
@@ -1292,7 +1294,7 @@ app.get("/api/health", async (req, res) => {
   }
 
   try {
-    const { documentRefineQueue } = await import("./server-queue.ts");
+    const { documentRefineQueue } = await import("./server-queue");
     const counts = await documentRefineQueue.getJobCounts();
     health.checks.queue = "ok";
     health.queueDepth = counts.waiting;
@@ -1464,12 +1466,30 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
   res.json({ user: req.user });
 });
 
-function repeatOptionsForFrequency(frequency?: string) {
+function repeatOptionsForFrequency(frequency?: string | null) {
   const normalized = (frequency || "manual").toLowerCase();
   if (normalized.includes("hour")) return { cron: "0 * * * *" };
   if (normalized.includes("week")) return { cron: "0 0 * * 0" };
   if (normalized.includes("daily") || normalized.includes("midnight")) return { cron: "0 0 * * *" };
   return null;
+}
+
+function requiredString(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function getTenantId(req: any): string {
+  const tenantId = req.user?.tenantId;
+  if (!tenantId) {
+    const err: any = new Error("Authenticated user is missing tenant ID");
+    err.statusCode = 401;
+    throw err;
+  }
+  return tenantId;
 }
 
 function isOAuthProvider(provider: string): provider is OAuthProvider {
@@ -1551,8 +1571,8 @@ app.get("/api/connectors/oauth/:provider/callback", async (req, res) => {
 
     const token = await exchangeCodeForToken(provider, code);
     const config = OAUTH_CONFIG[provider];
-    const tenantId = stateData.tenantId;
-    const connectorId = stateData.connectorId;
+    const tenantId = requiredString(stateData.tenantId, "default-tenant");
+    const connectorId = optionalString(stateData.connectorId);
 
     const lookup = connectorId
       ? { _id: connectorId, tenantId }
@@ -1594,11 +1614,11 @@ app.get("/api/connectors/oauth/:provider/callback", async (req, res) => {
     if (pgEnabled) {
       await pgUpsertConnector({
         mongoId: connector._id.toString(),
-        tenantId: connector.tenantId,
-        name: connector.name,
-        type: connector.type,
-        status: connector.status,
-        frequency: connector.frequency,
+        tenantId: requiredString(connector.tenantId, tenantId),
+        name: requiredString(connector.name, config.connectorName),
+        type: requiredString(connector.type, config.connectorType),
+        status: requiredString(connector.status, "connected"),
+        frequency: optionalString(connector.frequency),
         filesCount: connector.filesCount
       });
     }
@@ -1622,8 +1642,9 @@ app.get("/api/connectors/oauth/:provider/callback", async (req, res) => {
 
 app.get("/api/connectors", requireAuth, async (req, res) => {
   try {
+    const tenantId = getTenantId(req);
     if (pgEnabled) {
-      const rows = await pgGetConnectors(req.user!.tenantId);
+      const rows = await pgGetConnectors(tenantId);
       const formatted = rows.map(r => ({
         _id: r.mongo_id,
         id: r.mongo_id,
@@ -1640,7 +1661,7 @@ app.get("/api/connectors", requireAuth, async (req, res) => {
       res.json(formatted);
       return;
     }
-    const connectors = await Connector.find({ tenantId: req.user!.tenantId }).sort({ updatedAt: -1 });
+    const connectors = await Connector.find({ tenantId }).sort({ updatedAt: -1 });
     res.json(connectors);
   } catch (err: any) {
     res.status(500).json({ error: "Failed to fetch connectors", details: err.message });
@@ -1649,15 +1670,16 @@ app.get("/api/connectors", requireAuth, async (req, res) => {
 
 app.post("/api/connectors", requireAuth, async (req, res) => {
   try {
-    const { addConnectorSyncJob } = await import("./server-queue.ts");
+    const { addConnectorSyncJob } = await import("./server-queue");
+    const tenantId = getTenantId(req);
     const { name, type, frequency, credentials, config } = req.body;
-    if (!name || !type) {
+    if (typeof name !== "string" || typeof type !== "string") {
       res.status(400).json({ error: "Connector name and type are required" });
       return;
     }
 
     const connector = new Connector({
-      tenantId: req.user!.tenantId,
+      tenantId,
       id: `connector-${crypto.randomUUID()}`,
       name,
       type,
@@ -1673,11 +1695,11 @@ app.post("/api/connectors", requireAuth, async (req, res) => {
     if (pgEnabled) {
       await pgUpsertConnector({
         mongoId: connector._id.toString(),
-        tenantId: connector.tenantId,
-        name: connector.name,
-        type: connector.type,
-        status: connector.status,
-        frequency: connector.frequency,
+        tenantId: requiredString(connector.tenantId, tenantId),
+        name: requiredString(connector.name, name),
+        type: requiredString(connector.type, type),
+        status: requiredString(connector.status, "connected"),
+        frequency: optionalString(connector.frequency),
         filesCount: connector.filesCount
       });
     }
@@ -1697,9 +1719,11 @@ app.post("/api/connectors", requireAuth, async (req, res) => {
 
 app.post("/api/connectors/:id/sync", requireAuth, async (req, res) => {
   try {
-    let connId = req.params.id;
+    const tenantId = getTenantId(req);
+    const requestConnectorId = req.params.id;
+    let connId = requestConnectorId;
     if (pgEnabled) {
-      const pgConn = await pgGetConnectorById(req.params.id, req.user!.tenantId);
+      const pgConn = await pgGetConnectorById(requestConnectorId, tenantId);
       if (!pgConn) {
         res.status(404).json({ error: "Connector not found" });
         return;
@@ -1707,13 +1731,13 @@ app.post("/api/connectors/:id/sync", requireAuth, async (req, res) => {
       connId = pgConn.mongo_id;
     }
 
-    const connector = await Connector.findOne({ _id: connId, tenantId: req.user!.tenantId });
+    const connector = await Connector.findOne({ _id: connId, tenantId });
     if (!connector) {
       res.status(404).json({ error: "Connector not found" });
       return;
     }
 
-    const { addConnectorSyncJob } = await import("./server-queue.ts");
+    const { addConnectorSyncJob } = await import("./server-queue");
     const job = await addConnectorSyncJob(connector._id.toString());
     await logAudit(req, "UPDATE", "Connector", connector._id.toString(), { before: { status: connector.status }, after: { queuedJobId: job.id } });
     res.json({ queued: true, jobId: job.id, connectorId: connector._id.toString() });
@@ -1724,9 +1748,11 @@ app.post("/api/connectors/:id/sync", requireAuth, async (req, res) => {
 
 app.post("/api/connectors/:id/schedule", requireAuth, async (req, res) => {
   try {
-    let connId = req.params.id;
+    const tenantId = getTenantId(req);
+    const requestConnectorId = req.params.id;
+    let connId = requestConnectorId;
     if (pgEnabled) {
-      const pgConn = await pgGetConnectorById(req.params.id, req.user!.tenantId);
+      const pgConn = await pgGetConnectorById(requestConnectorId, tenantId);
       if (!pgConn) {
         res.status(404).json({ error: "Connector not found" });
         return;
@@ -1734,7 +1760,7 @@ app.post("/api/connectors/:id/schedule", requireAuth, async (req, res) => {
       connId = pgConn.mongo_id;
     }
 
-    const connector = await Connector.findOne({ _id: connId, tenantId: req.user!.tenantId });
+    const connector = await Connector.findOne({ _id: connId, tenantId });
     if (!connector) {
       res.status(404).json({ error: "Connector not found" });
       return;
@@ -1754,16 +1780,16 @@ app.post("/api/connectors/:id/schedule", requireAuth, async (req, res) => {
     if (pgEnabled) {
       await pgUpsertConnector({
         mongoId: connector._id.toString(),
-        tenantId: connector.tenantId,
-        name: connector.name,
-        type: connector.type,
-        status: connector.status,
-        frequency: connector.frequency,
+        tenantId: requiredString(connector.tenantId, tenantId),
+        name: requiredString(connector.name, "Connector"),
+        type: requiredString(connector.type, "custom"),
+        status: requiredString(connector.status, "connected"),
+        frequency: optionalString(connector.frequency),
         filesCount: connector.filesCount
       });
     }
 
-    const { addConnectorSyncJob } = await import("./server-queue.ts");
+    const { addConnectorSyncJob } = await import("./server-queue");
     const job = await addConnectorSyncJob(connector._id.toString(), { repeat });
     await logAudit(req, "UPDATE", "Connector", connector._id.toString(), { before: null, after: { frequency, cron: repeat.cron, jobId: job.id } });
     res.json({ scheduled: true, cron: repeat.cron, jobId: job.id, connector });
@@ -1774,13 +1800,14 @@ app.post("/api/connectors/:id/schedule", requireAuth, async (req, res) => {
 
 app.post("/api/storage/presign", requireAuth, async (req, res) => {
   try {
+    const tenantId = getTenantId(req);
     const { key, contentType, expiresSeconds } = req.body;
     if (!key || typeof key !== "string") {
       res.status(400).json({ error: "Object key is required" });
       return;
     }
 
-    const tenantKey = `${req.user!.tenantId}/${key}`;
+    const tenantKey = `${tenantId}/${key}`;
     const upload = createPresignedUpload({ key: tenantKey, contentType, expiresSeconds });
     res.json(upload);
   } catch (err: any) {
@@ -1791,8 +1818,9 @@ app.post("/api/storage/presign", requireAuth, async (req, res) => {
 
 app.put("/api/storage/upload", requireAuth, express.raw({ type: "*/*", limit: "100mb" }), async (req, res) => {
   try {
+    const tenantId = getTenantId(req);
     const key = String(req.query.key || "");
-    if (!key.startsWith(`${req.user!.tenantId}/`)) {
+    if (!key.startsWith(`${tenantId}/`)) {
       res.status(403).json({ error: "Storage key must be scoped to the authenticated tenant" });
       return;
     }
@@ -1810,8 +1838,9 @@ app.put("/api/storage/upload", requireAuth, express.raw({ type: "*/*", limit: "1
 // This is a structural PII gate: unmasked data cannot be accessed via the API after ingestion.
 app.get("/api/documents", requireAuth, async (req, res) => {
   try {
+    const tenantId = getTenantId(req);
     if (pgEnabled) {
-      const rows = await pgGetDocuments(req.user!.tenantId);
+      const rows = await pgGetDocuments(tenantId);
       const formatted = rows.map(r => ({
         _id: r.mongo_id,
         id: r.mongo_id,
@@ -1821,10 +1850,15 @@ app.get("/api/documents", requireAuth, async (req, res) => {
         status: r.status,
         size: `${((r.size_bytes || 0) / 1024).toFixed(1)} KB`,
         connector: r.connector,
+        metadata: r.metadata,
         readinessScore: r.readiness_score,
         piiFindingsCount: r.pii_findings_count,
+        piiFindings: r.pii_findings,
+        duplicatesRemoved: r.duplicates_removed,
         chunksCount: r.chunks_count,
         vectorSync: r.vector_synced,
+        tokenCount: r.token_count,
+        embeddingCost: r.embedding_cost,
         createdAt: r.created_at,
         updatedAt: r.updated_at
       }));
@@ -1832,7 +1866,7 @@ app.get("/api/documents", requireAuth, async (req, res) => {
       return;
     }
     const docs = await Document.find(
-      { tenantId: req.user!.tenantId },
+      { tenantId },
       { rawContent: 0 }  // PII gate: never expose unmasked source content via API
     ).sort({ createdAt: -1 });
     res.json(docs);
@@ -1846,22 +1880,24 @@ app.get("/api/documents", requireAuth, async (req, res) => {
 // rawContent (unmasked source) is EXCLUDED — PII structural gate.
 app.get("/api/documents/:id", requireAuth, async (req, res) => {
   try {
-    let docId = req.params.id;
+    const tenantId = getTenantId(req);
+    const requestDocumentId = req.params.id;
+    let docId = requestDocumentId;
     if (pgEnabled) {
-      const pgDoc = await pgGetDocumentById(req.params.id, req.user!.tenantId);
+      const pgDoc = await pgGetDocumentById(requestDocumentId, tenantId);
       if (!pgDoc) {
         return res.status(404).json({ error: "Document not found" });
       }
       docId = pgDoc.mongo_id;
     }
     const doc = await Document.findOne(
-      { _id: docId, tenantId: req.user!.tenantId },
+      { _id: docId, tenantId },
       { rawContent: 0 }  // PII gate: never expose unmasked source content via API
     );
     if (!doc) {
       return res.status(404).json({ error: "Document not found" });
     }
-    await logAudit(req, "READ", "Document", req.params.id);
+    await logAudit(req, "READ", "Document", requestDocumentId);
     res.json(doc);
   } catch (err: any) {
     res.status(500).json({ error: "Failed to fetch document", details: err.message });
@@ -1872,25 +1908,27 @@ app.get("/api/documents/:id", requireAuth, async (req, res) => {
 // DELETE document (tenant isolated)
 app.delete("/api/documents/:id", requireAuth, async (req, res) => {
   try {
-    let docId = req.params.id;
+    const tenantId = getTenantId(req);
+    const requestDocumentId = req.params.id;
+    let docId = requestDocumentId;
     if (pgEnabled) {
-      const pgDoc = await pgGetDocumentById(req.params.id, req.user!.tenantId);
+      const pgDoc = await pgGetDocumentById(requestDocumentId, tenantId);
       if (!pgDoc) {
         return res.status(404).json({ error: "Document not found" });
       }
       docId = pgDoc.mongo_id;
     }
-    const doc = await Document.findOne({ _id: docId, tenantId: req.user!.tenantId });
+    const doc = await Document.findOne({ _id: docId, tenantId });
     if (!doc) {
       return res.status(404).json({ error: "Document not found" });
     }
     
-    await logAudit(req, "DELETE", "Document", req.params.id, { before: doc, after: null });
+    await logAudit(req, "DELETE", "Document", requestDocumentId, { before: doc, after: null });
     await Document.deleteOne({ _id: docId });
     if (pgEnabled) {
-      await pgDeleteDocument(req.params.id, req.user!.tenantId);
+      await pgDeleteDocument(requestDocumentId, tenantId);
     }
-    res.json({ success: true, id: req.params.id });
+    res.json({ success: true, id: requestDocumentId });
   } catch (err: any) {
     res.status(500).json({ error: "Failed to delete document", details: err.message });
   }
@@ -1899,20 +1937,22 @@ app.delete("/api/documents/:id", requireAuth, async (req, res) => {
 // EXPORT document as JSON (tenant isolated, audited)
 app.post("/api/documents/:id/export", requireAuth, async (req, res) => {
   try {
-    let docId = req.params.id;
+    const tenantId = getTenantId(req);
+    const requestDocumentId = req.params.id;
+    let docId = requestDocumentId;
     if (pgEnabled) {
-      const pgDoc = await pgGetDocumentById(req.params.id, req.user!.tenantId);
+      const pgDoc = await pgGetDocumentById(requestDocumentId, tenantId);
       if (!pgDoc) {
         return res.status(404).json({ error: "Document not found" });
       }
       docId = pgDoc.mongo_id;
     }
-    const doc = await Document.findOne({ _id: docId, tenantId: req.user!.tenantId });
+    const doc = await Document.findOne({ _id: docId, tenantId });
     if (!doc) {
       return res.status(404).json({ error: "Document not found" });
     }
-    await logAudit(req, "EXPORT", "Document", req.params.id);
-    res.setHeader("Content-Disposition", `attachment; filename="${doc.name.replace(/[^a-z0-9._-]/gi, '_')}_export.json"`);
+    await logAudit(req, "EXPORT", "Document", requestDocumentId);
+    res.setHeader("Content-Disposition", `attachment; filename="${requiredString(doc.name, "document").replace(/[^a-z0-9._-]/gi, '_')}_export.json"`);
     res.setHeader("Content-Type", "application/json");
     res.json({
       id: doc._id,
@@ -2110,7 +2150,7 @@ app.post("/api/documents/:id/refine", requireAuth, async (req: any, res: any) =>
 
     await logAudit(req, "UPDATE", "Document", req.params.id);
 
-    const { addRefineJob } = await import("./server-queue.ts");
+    const { addRefineJob } = await import("./server-queue");
     await addRefineJob(doc._id.toString());
 
     res.json({ document: doc, quota: { plan: quota.org.plan, refinementLimit: quota.limit, remaining: quota.remaining } });
@@ -2173,7 +2213,10 @@ app.post("/api/refine-text", requireAuth, async (req: any, res: any) => {
   }
 });
 
-    const { User, Organization } = await import("./server-db.ts");
+// BILLING: Current Plan
+app.get("/api/billing/plan", requireAuth, async (req: any, res: any) => {
+  try {
+    const { User, Organization } = await import("./server-db");
     const user = await User.findById(req.user.id);
     if (!user) {
       res.status(404).json({ error: "User not found" });
@@ -2209,7 +2252,7 @@ app.post("/api/billing/upgrade", requireAuth, async (req: any, res: any) => {
       });
     }
 
-    const { User, Organization, AuditLog } = await import("./server-db.ts");
+    const { User, Organization, AuditLog } = await import("./server-db");
     let org = await Organization.findOne({ tenantId });
     if (!org) {
       org = new Organization({
@@ -2357,9 +2400,10 @@ app.get("/openapi.yaml", (req, res) => {
 // Aggregate Stats API for Analytics (tenant isolated)
 app.get("/api/stats", requireAuth, async (req, res) => {
   try {
+    const tenantId = getTenantId(req);
     let docs: any[];
     if (pgEnabled) {
-      const rows = await pgGetDocuments(req.user!.tenantId);
+      const rows = await pgGetDocuments(tenantId);
       docs = rows.map(r => ({
         _id: r.mongo_id,
         id: r.mongo_id,
@@ -2381,9 +2425,9 @@ app.get("/api/stats", requireAuth, async (req, res) => {
     }
     const totalDocs = docs.length;
     const refinedCount = docs.filter(d => d.status === "refined").length;
-    const totalChunks = docs.reduce((acc, d) => acc + d.chunks.length, 0);
-    const totalPii = docs.reduce((acc, d) => acc + d.piiFindingsCount, 0);
-    const totalDuplicates = docs.reduce((acc, d) => acc + d.duplicatesRemoved, 0);
+    const totalChunks = docs.reduce((acc, d) => acc + (Array.isArray(d.chunks) ? d.chunks.length : d.chunksCount || 0), 0);
+    const totalPii = docs.reduce((acc, d) => acc + (d.piiFindingsCount || 0), 0);
+    const totalDuplicates = docs.reduce((acc, d) => acc + (d.duplicatesRemoved || 0), 0);
     
     const refinedDocs = docs.filter(d => d.status === "refined" && d.readinessScore);
     const avgReadiness = refinedDocs.length > 0 
@@ -2425,6 +2469,7 @@ app.get("/api/stats", requireAuth, async (req, res) => {
 
     res.json({
       totalDocs,
+      totalDocuments: totalDocs,
       refinedCount,
       totalChunks,
       totalPii,
@@ -2454,7 +2499,7 @@ app.get("/api/stats", requireAuth, async (req, res) => {
 // Data retention cleaner
 async function runRetentionCleanup() {
   try {
-    const { Organization, Document, AuditLog } = await import("./server-db.ts");
+    const { Organization, Document, AuditLog } = await import("./server-db");
     const orgs = await Organization.find({ retentionDays: { $gt: 0 } });
     
     for (const org of orgs) {
@@ -2494,7 +2539,7 @@ async function runRetentionCleanup() {
 
 app.get("/api/admin/settings", requireAuth, enforceIpAllowlist, async (req: any, res: any) => {
   try {
-    const { User, Organization } = await import("./server-db.ts");
+    const { User, Organization } = await import("./server-db");
     const user = await User.findById(req.user.id);
     if (!user) {
       res.status(404).json({ error: "User not found" });
@@ -2520,7 +2565,7 @@ app.get("/api/admin/settings", requireAuth, enforceIpAllowlist, async (req: any,
 app.post("/api/admin/settings", requireAuth, enforceIpAllowlist, async (req: any, res: any) => {
   try {
     const { ipAllowlist, retentionDays, webhookUrl, webhookSecret, chunkingOverlap, chunkingStrategy, locale } = req.body;
-    const { User, Organization, AuditLog } = await import("./server-db.ts");
+    const { User, Organization, AuditLog } = await import("./server-db");
     const user = await User.findById(req.user.id);
     if (!user) {
       res.status(404).json({ error: "User not found" });
@@ -2597,7 +2642,7 @@ app.post("/api/admin/settings", requireAuth, enforceIpAllowlist, async (req: any
 
 app.get("/api/admin/queues", requireAuth, enforceIpAllowlist, async (req: any, res: any) => {
   try {
-    const { documentRefineQueue, embeddingQueue } = await import("./server-queue.ts");
+    const { documentRefineQueue, embeddingQueue } = await import("./server-queue");
     const [refineCounts, embedCounts] = await Promise.all([
       documentRefineQueue.getJobCounts(),
       embeddingQueue.getJobCounts(),
@@ -2634,7 +2679,7 @@ app.get("/api/admin/queues", requireAuth, enforceIpAllowlist, async (req: any, r
 
 app.get("/api/admin/webhooks/logs", requireAuth, enforceIpAllowlist, async (req: any, res: any) => {
   try {
-    const { WebhookLog } = await import("./server-db.ts");
+    const { WebhookLog } = await import("./server-db");
     const logs = await WebhookLog.find({ tenantId: req.user.tenantId })
       .sort({ timestamp: -1 })
       .limit(50);
@@ -2646,7 +2691,7 @@ app.get("/api/admin/webhooks/logs", requireAuth, enforceIpAllowlist, async (req:
 
 app.get("/api/admin/traces/:documentId", requireAuth, async (req: any, res: any) => {
   try {
-    const { TraceSpan } = await import("./server-db.ts");
+    const { TraceSpan } = await import("./server-db");
     const spans = await TraceSpan.find({
       documentId: req.params.documentId,
       tenantId: req.user!.tenantId
@@ -2799,7 +2844,7 @@ async function gracefulShutdown(signal: string) {
   // Close Redis Clients
   console.log("[SHUTDOWN] Closing Redis connections...");
   try {
-    const { authRedisClient } = await import("./server-auth.ts");
+    const { authRedisClient } = await import("./server-auth");
     await authRedisClient.quit();
   } catch (e: any) {
     console.error("Error closing auth Redis:", e.message);

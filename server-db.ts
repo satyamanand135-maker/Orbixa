@@ -151,9 +151,11 @@ const OrganizationSchema = new mongoose.Schema(
     storageQuotaBytes: { type: Number, default: 104857600 }, // 100 MB free tier
     documentQuota: { type: Number, default: 50 },           // max docs on free plan
     refinementQuota: { type: Number, default: 5 },          // max refinements/month free
-    // Stripe billing
+    // Billing provider identifiers
     stripeCustomerId: { type: String, default: null },
     stripeSubscriptionId: { type: String, default: null },
+    paddleCustomerId: { type: String, default: null },
+    paddleSubscriptionId: { type: String, default: null },
     subscriptionStatus: { type: String, default: "inactive" },
   },
   { timestamps: true }

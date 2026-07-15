@@ -487,7 +487,9 @@ export function setupEmbeddingProcessor() {
       const embedSpan = startSpan("Stage 6: Embedding Generation", doc._id.toString(), doc.tenantId, traceId);
       embedSpan.setAttribute("chunks_count", chunksToEmbed.length);
       
-      const texts = chunksToEmbed.map((c) => c.text);
+      const texts = chunksToEmbed
+        .map((c) => c.text)
+        .filter((text): text is string => typeof text === "string");
       const embeddingResult = await generateEmbeddings(texts);
       const embeddings = embeddingResult.embeddings;
       embedSpan.setAttribute("embedding_provider", embeddingResult.provider);
