@@ -2173,20 +2173,6 @@ app.post("/api/refine-text", requireAuth, async (req: any, res: any) => {
   }
 });
 
-// BILLING: Get current plan status
-app.get("/api/billing/plan", requireAuth, async (req: any, res: any) => {
-  try {
-    let tenantId = req.user.tenantId;
-    if (pgEnabled) {
-      const org = await pgGetOrganization(tenantId);
-      res.json({
-        plan: org?.plan || "free",
-        refinementCount: org?.refinement_count || 0,
-        refinementLimit: (org?.plan === "enterprise") ? null : FREE_PLAN_REFINEMENT_LIMIT,
-        tenantId,
-      });
-      return;
-    }
     const { User, Organization } = await import("./server-db.ts");
     const user = await User.findById(req.user.id);
     if (!user) {

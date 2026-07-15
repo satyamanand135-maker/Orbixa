@@ -1,21 +1,22 @@
 /**
- * server-billing.ts — Stripe billing integration
+ * server-billing.ts — Paddle billing integration for Orbixa
  *
  * Endpoints:
- *   POST /api/billing/checkout      — Create Stripe Checkout Session (→ payment link)
- *   POST /api/billing/webhook       — Handle Stripe webhook events
- *   GET  /api/billing/portal        — Create Stripe Customer Portal session
- *   GET  /api/billing/plan          — Current plan info (already in server.ts, re-exported here)
+ *   POST /api/billing/checkout      — Create Paddle checkout URL
+ *   POST /api/billing/webhook       — Handle Paddle webhook events
+ *   GET  /api/billing/portal        — Redirect to Paddle customer portal
+ *   GET  /api/billing/plan          — Current plan info for tenant
  *
- * Environment variables:
- *   STRIPE_SECRET_KEY        — sk_live_… or sk_test_… (required for real billing)
- *   STRIPE_WEBHOOK_SECRET    — whsec_… (required to verify webhook signatures)
- *   STRIPE_PRICE_PRO         — Price ID for Pro plan (e.g. price_…)
- *   STRIPE_PRICE_ENTERPRISE  — Price ID for Enterprise plan
+ * Environment variables (add these to Railway):
+ *   PADDLE_API_KEY                  — Your Paddle API key
+ *   PADDLE_WEBHOOK_SECRET           — Your Paddle webhook secret
+ *   PADDLE_STARTER_PRICE_ID         — pri_01kxjk8vc7s284vm5khsjtr5ja
+ *   PADDLE_PRO_PRICE_ID             — pri_01kxjkk4jhssnstk25bjs83mpj
+ *   PADDLE_BUSINESS_PRICE_ID        — pri_01kxjkndtt18tv99bw6f6der6x
  *
  * Graceful degradation:
- *   If STRIPE_SECRET_KEY is not set, all endpoints return mock responses so that
- *   tests and development environments continue to work without a Stripe account.
+ *   If PADDLE_API_KEY is not set, all endpoints return mock responses so
+ *   development and tests work without a Paddle account.
  */
 
 import express, { Router, Request, Response } from "express";
@@ -25,90 +26,133 @@ import { requireAuth } from "./server-auth.ts";
 const router = Router();
 
 // ---------------------------------------------------------------------------
-// Stripe lazy-loader (avoids hard dependency when key is absent)
+// Config
 // ---------------------------------------------------------------------------
-const STRIPE_KEY = process.env.STRIPE_SECRET_KEY || "";
-const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
-const PRICE_PRO = process.env.STRIPE_PRICE_PRO || "price_pro_monthly";
-const PRICE_ENTERPRISE = process.env.STRIPE_PRICE_ENTERPRISE || "price_enterprise_monthly";
+const PADDLE_API_KEY       = process.env.PADDLE_API_KEY || "";
+const PADDLE_WEBHOOK_SECRET = process.env.PADDLE_WEBHOOK_SECRET || "";
+const PADDLE_API_BASE      = "https://api.paddle.com"; // use https://sandbox-api.paddle.com for testing
 
-type StripeClient = any; // Stripe types — installed via `npm i stripe`
-let _stripe: StripeClient | null = null;
+const PRICE_IDS: Record<string, string> = {
+  starter:  process.env.PADDLE_STARTER_PRICE_ID  || "pri_01kxjk8vc7s284vm5khsjtr5ja",
+  pro:      process.env.PADDLE_PRO_PRICE_ID       || "pri_01kxjkk4jhssnstk25bjs83mpj",
+  business: process.env.PADDLE_BUSINESS_PRICE_ID  || "pri_01kxjkndtt18tv99bw6f6der6x",
+};
 
-async function getStripe(): Promise<StripeClient | null> {
-  if (!STRIPE_KEY) return null;
-  if (_stripe) return _stripe;
-  try {
-    const { default: Stripe } = await import("stripe" as any);
-    _stripe = new Stripe(STRIPE_KEY, { apiVersion: "2024-06-20" });
-    return _stripe;
-  } catch {
-    console.warn("[Billing] Stripe package not installed. Run: npm install stripe");
-    return null;
-  }
-}
+const PLAN_LIMITS: Record<string, number> = {
+  free:     10,
+  starter:  100,
+  pro:      1000,
+  business: 10000,
+};
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Paddle API helper
 // ---------------------------------------------------------------------------
+async function paddleRequest(
+  method: string,
+  path: string,
+  body?: object
+): Promise<any> {
+  if (!PADDLE_API_KEY) return null;
 
-/** Verify Stripe webhook signature (raw body required) */
-function verifyStripeSignature(rawBody: Buffer, signature: string, secret: string): boolean {
-  if (!secret) return false;
-  try {
-    // Stripe signature format: t=timestamp,v1=hmac,...
-    const parts = signature.split(",");
-    const tPart = parts.find((p) => p.startsWith("t="));
-    const v1Parts = parts.filter((p) => p.startsWith("v1="));
-    if (!tPart || v1Parts.length === 0) return false;
-
-    const timestamp = tPart.slice(2);
-    const payload = `${timestamp}.${rawBody.toString("utf8")}`;
-
-    for (const v1 of v1Parts) {
-      const expected = v1.slice(3);
-      const computed = crypto.createHmac("sha256", secret).update(payload).digest("hex");
-      if (crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(expected))) {
-        return true;
-      }
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-/** Get or create Stripe customer for a tenant */
-async function getOrCreateStripeCustomer(stripe: StripeClient, org: any): Promise<string> {
-  if (org.stripeCustomerId) return org.stripeCustomerId;
-
-  const customer = await stripe.customers.create({
-    email: org.billingEmail || `billing@${org.tenantId}.dhub.io`,
-    name: org.name || org.tenantId,
-    metadata: { tenantId: org.tenantId },
+  const res = await fetch(`${PADDLE_API_BASE}${path}`, {
+    method,
+    headers: {
+      "Authorization": `Bearer ${PADDLE_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
   });
 
-  org.stripeCustomerId = customer.id;
-  await org.save();
-  return customer.id;
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(`Paddle API error: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// Webhook signature verification
+// ---------------------------------------------------------------------------
+function verifyPaddleSignature(
+  rawBody: Buffer,
+  signatureHeader: string,
+  secret: string
+): boolean {
+  if (!secret || !signatureHeader) return false;
+  try {
+    // Paddle signature format: ts=timestamp;h1=hmac
+    const parts: Record<string, string> = {};
+    signatureHeader.split(";").forEach((part) => {
+      const [key, val] = part.split("=");
+      parts[key] = val;
+    });
+
+    const timestamp = parts["ts"];
+    const signature = parts["h1"];
+    if (!timestamp || !signature) return false;
+
+    const payload = `${timestamp}:${rawBody.toString("utf8")}`;
+    const computed = crypto
+      .createHmac("sha256", secret)
+      .update(payload)
+      .digest("hex");
+
+    return crypto.timingSafeEqual(
+      Buffer.from(computed),
+      Buffer.from(signature)
+    );
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Get or create Paddle customer
+// ---------------------------------------------------------------------------
+async function getOrCreatePaddleCustomer(org: any): Promise<string | null> {
+  if (!PADDLE_API_KEY) return null;
+
+  // Return existing customer ID if we have it
+  if (org.paddleCustomerId) return org.paddleCustomerId;
+
+  // Create new customer in Paddle
+  const data = await paddleRequest("POST", "/customers", {
+    email: org.billingEmail || `billing@${org.tenantId}.orbixa.io`,
+    name:  org.name || org.tenantId,
+  });
+
+  const customerId = data?.data?.id;
+  if (customerId) {
+    org.paddleCustomerId = customerId;
+    await org.save();
+  }
+
+  return customerId || null;
 }
 
 // ---------------------------------------------------------------------------
 // POST /api/billing/checkout
+// Creates a Paddle checkout transaction and returns the checkout URL
 // ---------------------------------------------------------------------------
 router.post("/checkout", requireAuth, async (req: Request, res: Response) => {
   try {
-    const stripe = await getStripe();
-    const plan: "pro" | "enterprise" = req.body?.plan || "pro";
-    const successUrl = req.body?.successUrl || `${process.env.APP_URL || "http://localhost:3000"}/billing/success`;
-    const cancelUrl = req.body?.cancelUrl || `${process.env.APP_URL || "http://localhost:3000"}/billing/cancel`;
+    const plan: "starter" | "pro" | "business" = req.body?.plan || "starter";
+    const successUrl =
+      req.body?.successUrl ||
+      `${process.env.APP_URL || "http://localhost:3000"}/billing/success`;
 
-    if (!stripe) {
-      // Mock response for dev/test
+    const priceId = PRICE_IDS[plan];
+    if (!priceId) {
+      return res.status(400).json({ error: `Unknown plan: ${plan}` });
+    }
+
+    // Mock response if Paddle not configured
+    if (!PADDLE_API_KEY) {
       return res.json({
         mock: true,
-        url: `${successUrl}?session_id=mock_session_${crypto.randomUUID()}`,
-        message: "Stripe not configured — returning mock checkout URL",
+        url: `${successUrl}?mock=true&plan=${plan}`,
+        message: "Paddle not configured — returning mock checkout URL",
       });
     }
 
@@ -116,20 +160,30 @@ router.post("/checkout", requireAuth, async (req: Request, res: Response) => {
     const org = await Organization.findOne({ tenantId: req.user!.tenantId });
     if (!org) return res.status(404).json({ error: "Organization not found" });
 
-    const customerId = await getOrCreateStripeCustomer(stripe, org);
-    const priceId = plan === "enterprise" ? PRICE_ENTERPRISE : PRICE_PRO;
+    const customerId = await getOrCreatePaddleCustomer(org);
 
-    const session = await stripe.checkout.sessions.create({
-      customer: customerId,
-      payment_method_types: ["card"],
-      line_items: [{ price: priceId, quantity: 1 }],
-      mode: "subscription",
-      success_url: `${successUrl}?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: cancelUrl,
-      metadata: { tenantId: req.user!.tenantId, plan },
+    // Create Paddle transaction (checkout)
+    const data = await paddleRequest("POST", "/transactions", {
+      items: [{ price_id: priceId, quantity: 1 }],
+      customer_id: customerId,
+      checkout: {
+        url: successUrl,
+      },
+      custom_data: {
+        tenantId: req.user!.tenantId,
+        plan,
+      },
     });
 
-    res.json({ url: session.url, sessionId: session.id });
+    const checkoutUrl = data?.data?.checkout?.url;
+    if (!checkoutUrl) {
+      throw new Error("No checkout URL returned from Paddle");
+    }
+
+    res.json({
+      url: checkoutUrl,
+      transactionId: data?.data?.id,
+    });
   } catch (err: any) {
     console.error("[Billing] Checkout error:", err);
     res.status(500).json({ error: "Failed to create checkout session" });
@@ -138,28 +192,36 @@ router.post("/checkout", requireAuth, async (req: Request, res: Response) => {
 
 // ---------------------------------------------------------------------------
 // GET /api/billing/portal
+// Redirects user to Paddle's customer portal to manage subscription
 // ---------------------------------------------------------------------------
 router.get("/portal", requireAuth, async (req: Request, res: Response) => {
   try {
-    const stripe = await getStripe();
-    const returnUrl = req.query.returnUrl as string || `${process.env.APP_URL || "http://localhost:3000"}/billing`;
+    const returnUrl =
+      (req.query.returnUrl as string) ||
+      `${process.env.APP_URL || "http://localhost:3000"}/billing`;
 
-    if (!stripe) {
-      return res.json({ mock: true, url: returnUrl, message: "Stripe not configured" });
+    if (!PADDLE_API_KEY) {
+      return res.json({ mock: true, url: returnUrl, message: "Paddle not configured" });
     }
 
     const { Organization } = await import("./server-db.ts");
     const org = await Organization.findOne({ tenantId: req.user!.tenantId });
-    if (!org?.stripeCustomerId) {
-      return res.status(400).json({ error: "No Stripe customer found. Please subscribe first." });
+
+    if (!org?.paddleCustomerId) {
+      return res.status(400).json({
+        error: "No Paddle customer found. Please subscribe first.",
+      });
     }
 
-    const session = await stripe.billingPortal.sessions.create({
-      customer: org.stripeCustomerId,
-      return_url: returnUrl,
-    });
+    // Create customer portal session
+    const data = await paddleRequest(
+      "POST",
+      `/customers/${org.paddleCustomerId}/portal-sessions`,
+      { urls: { general: { overview: returnUrl } } }
+    );
 
-    res.json({ url: session.url });
+    const portalUrl = data?.data?.urls?.general?.overview;
+    res.json({ url: portalUrl || returnUrl });
   } catch (err: any) {
     console.error("[Billing] Portal error:", err);
     res.status(500).json({ error: "Failed to create billing portal session" });
@@ -167,16 +229,52 @@ router.get("/portal", requireAuth, async (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/billing/webhook  (raw body required — mount before express.json())
+// GET /api/billing/plan
+// Returns current plan info for the authenticated tenant
+// ---------------------------------------------------------------------------
+router.get("/plan", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { Organization } = await import("./server-db.ts");
+    const org = await Organization.findOne({ tenantId: req.user!.tenantId });
+
+    const plan = org?.plan || "free";
+    const limit = PLAN_LIMITS[plan] || 10;
+
+    res.json({
+      plan,
+      limit,
+      used: org?.refinementCount || 0,
+      remaining: Math.max(0, limit - (org?.refinementCount || 0)),
+      subscriptionStatus: org?.subscriptionStatus || "inactive",
+      paddleCustomerId: org?.paddleCustomerId || null,
+      plans: [
+        { id: "starter",  name: "Starter",  price: "$99/month",  docs: 100 },
+        { id: "pro",      name: "Pro",       price: "$299/month", docs: 1000 },
+        { id: "business", name: "Business",  price: "$999/month", docs: 10000 },
+      ],
+    });
+  } catch (err: any) {
+    console.error("[Billing] Plan error:", err);
+    res.status(500).json({ error: "Failed to get plan info" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/billing/webhook
+// Handles Paddle webhook events — mounted before express.json() for raw body
 // ---------------------------------------------------------------------------
 export function registerBillingWebhook(app: import("express").Express) {
   app.post(
     "/api/billing/webhook",
     express.raw({ type: "application/json" }),
     async (req: Request, res: Response) => {
-      const signature = req.headers["stripe-signature"] as string;
+      const signatureHeader = req.headers["paddle-signature"] as string;
 
-      if (!verifyStripeSignature(req.body as Buffer, signature, WEBHOOK_SECRET)) {
+      // Verify webhook signature
+      if (
+        PADDLE_WEBHOOK_SECRET &&
+        !verifyPaddleSignature(req.body as Buffer, signatureHeader, PADDLE_WEBHOOK_SECRET)
+      ) {
         console.warn("[Billing] Webhook signature verification failed");
         return res.status(400).json({ error: "Invalid webhook signature" });
       }
@@ -188,58 +286,96 @@ export function registerBillingWebhook(app: import("express").Express) {
         return res.status(400).json({ error: "Invalid JSON payload" });
       }
 
+      console.log(`[Billing] Webhook received: ${event.event_type}`);
+
       try {
         const { Organization } = await import("./server-db.ts");
 
-        switch (event.type) {
-          case "customer.subscription.updated":
-          case "customer.subscription.created": {
-            const sub = event.data.object;
-            const tenantId = sub.metadata?.tenantId;
+        switch (event.event_type) {
+
+          // Subscription activated or renewed
+          case "subscription.created":
+          case "subscription.activated": {
+            const sub = event.data;
+            const tenantId = sub.custom_data?.tenantId;
+            const plan = sub.custom_data?.plan || "starter";
+
             if (tenantId) {
-              const plan = sub.metadata?.plan || "pro";
               await Organization.findOneAndUpdate(
                 { tenantId },
-                { plan, stripeSubscriptionId: sub.id, subscriptionStatus: sub.status }
+                {
+                  plan,
+                  paddleSubscriptionId: sub.id,
+                  paddleCustomerId: sub.customer_id,
+                  subscriptionStatus: "active",
+                  refinementCount: 0, // reset usage on new subscription
+                }
+              );
+              console.log(`[Billing] Subscription activated: tenant=${tenantId} plan=${plan}`);
+            }
+            break;
+          }
+
+          // Subscription updated (upgrade/downgrade)
+          case "subscription.updated": {
+            const sub = event.data;
+            const tenantId = sub.custom_data?.tenantId;
+            const plan = sub.custom_data?.plan || "starter";
+
+            if (tenantId) {
+              await Organization.findOneAndUpdate(
+                { tenantId },
+                {
+                  plan,
+                  subscriptionStatus: sub.status,
+                }
               );
               console.log(`[Billing] Subscription updated: tenant=${tenantId} plan=${plan} status=${sub.status}`);
             }
             break;
           }
 
-          case "customer.subscription.deleted": {
-            const sub = event.data.object;
-            const tenantId = sub.metadata?.tenantId;
+          // Subscription cancelled
+          case "subscription.canceled": {
+            const sub = event.data;
+            const tenantId = sub.custom_data?.tenantId;
+
             if (tenantId) {
               await Organization.findOneAndUpdate(
                 { tenantId },
-                { plan: "free", subscriptionStatus: "canceled" }
+                {
+                  plan: "free",
+                  subscriptionStatus: "canceled",
+                }
               );
               console.log(`[Billing] Subscription cancelled: tenant=${tenantId}`);
             }
             break;
           }
 
-          case "invoice.payment_succeeded": {
-            const inv = event.data.object;
-            console.log(`[Billing] Invoice paid: ${inv.id} amount=${inv.amount_paid}`);
+          // Payment completed successfully
+          case "transaction.completed": {
+            const tx = event.data;
+            const tenantId = tx.custom_data?.tenantId;
+            console.log(`[Billing] Payment completed: tenant=${tenantId} amount=${tx.details?.totals?.total}`);
             break;
           }
 
-          case "invoice.payment_failed": {
-            const inv = event.data.object;
-            const tenantId = inv.subscription_details?.metadata?.tenantId;
-            console.error(`[Billing] Payment failed for tenant=${tenantId} invoice=${inv.id}`);
-            // Optionally: downgrade to free, send alert email
+          // Payment failed
+          case "transaction.payment_failed": {
+            const tx = event.data;
+            const tenantId = tx.custom_data?.tenantId;
+            console.error(`[Billing] Payment failed: tenant=${tenantId}`);
+            // Optionally downgrade to free or send alert
             break;
           }
 
           default:
-            // Acknowledge unknown events without processing
+            // Acknowledge all other events without processing
             break;
         }
 
-        res.json({ received: true, type: event.type });
+        res.json({ received: true, type: event.event_type });
       } catch (err: any) {
         console.error("[Billing] Webhook handler error:", err);
         res.status(500).json({ error: "Webhook processing failed" });
