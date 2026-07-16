@@ -1,6 +1,6 @@
 import React from "react";
-import { 
-  LayoutDashboard, 
+import {
+  LayoutDashboard,
   Cpu, 
   Share2, 
   Database, 
@@ -12,6 +12,12 @@ import {
 } from "lucide-react";
 import { ActiveView } from "../types";
 
+type MenuItem = {
+  id: ActiveView;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+};
+
 interface SidebarProps {
   activeView: ActiveView;
   setActiveView: (view: ActiveView) => void;
@@ -21,13 +27,14 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ activeView, setActiveView, apiKeyLoaded, user, onLogout }: SidebarProps) {
-  const menuItems = [
+  const menuItems: MenuItem[] = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "refinery", label: "Data Refinery", icon: Cpu },
     { id: "connectors", label: "Connectors", icon: Share2 },
     { id: "vector", label: "Vector DB Sync", icon: Database },
     { id: "analytics", label: "Analytics", icon: BarChart3 },
     { id: "gaps", label: "Gaps Tracker", icon: AlertTriangle },
+    { id: "pricing", label: "Upgrade Plan", icon: Activity },
   ];
 
   if (user && user.role === "admin") {
@@ -57,7 +64,7 @@ export default function Sidebar({ activeView, setActiveView, apiKeyLoaded, user,
             return (
               <button
                 key={item.id}
-                onClick={() => setActiveView(item.id as ActiveView)}
+                onClick={() => setActiveView(item.id)}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-medium transition-all ${
                   isActive 
                     ? "bg-[#18181b] text-[#3b82f6] border-l-2 border-[#3b82f6] font-semibold" 

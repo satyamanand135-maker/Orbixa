@@ -11,6 +11,8 @@ import { DocumentRecord, ActiveView } from "./types";
 import { Activity, ShieldCheck, AlertCircle } from "lucide-react";
 import { NotificationProvider, useNotification } from "./context/NotificationContext";
 import { ToastContainer } from "./components/ToastContainer";
+import { UpgradeModal } from "./components/UpgradeModal";
+import { PricingPage } from "./components/PricingPage";
 
 export default function App() {
   return (
@@ -30,6 +32,12 @@ function AppContent() {
   const [loadingDocs, setLoadingDocs] = useState(true);
   const [loadingStates, setLoadingStates] = useState<{ [key: string]: boolean }>({});
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const [upgradeModal, setUpgradeModal] = useState<{
+    open: boolean;
+    used: number;
+    limit: number;
+  }>({ open: false, used: 5, limit: 5 });
 
   // Authentication State
   const [token, setToken] = useState<string | null>(localStorage.getItem("dhub_token"));
@@ -189,6 +197,13 @@ function AppContent() {
         await fetchDocuments();
         await fetchStats();
         addToast("success", "Document refined successfully", "The document has been processed through the refinery pipeline.");
+      } else if (res.status === 402) {
+        const data = await res.json();
+        setUpgradeModal({
+          open: true,
+          used: data.quota?.refinementCount || 5,
+          limit: data.quota?.refinementLimit || 5,
+        });
       } else {
         const data = await res.json();
         addToast("error", "Refinement failed", data.error || "Unknown server error");
@@ -268,7 +283,7 @@ function AppContent() {
       });
       if (res.ok) {
         const result = await res.json();
-        
+
         const mockDoc: DocumentRecord = {
           id: `sandbox-${Date.now()}`,
           name: name || "sandbox_result.txt",
@@ -292,12 +307,23 @@ function AppContent() {
           duplicatesRemoved: result.duplicatesRemoved,
           createdAt: new Date().toISOString()
         };
-        
+
         setDocuments(prev => [mockDoc, ...prev]);
         await fetchStats();
         addToast("success", "Quick refine complete", "Sandbox data processed successfully.");
         return mockDoc;
-      } else {
+      } 
+      
+      else if (res.status === 402) {
+  const data = await res.json();
+  setUpgradeModal({
+    open: true,
+    used: data.quota?.refinementCount || 5,
+    limit: data.quota?.refinementLimit || 5,
+  });
+  throw new Error("quota");
+}
+      else {
         throw new Error("Refinement failed on server");
       }
     } catch (err) {
@@ -398,10 +424,10 @@ function AppContent() {
 
   return (
     <div className="flex bg-[#0A0A0B] text-[#E4E4E7] font-sans min-h-screen">
-      <Sidebar 
-        activeView={activeView} 
-        setActiveView={setActiveView} 
-        apiKeyLoaded={apiKeyLoaded} 
+      <Sidebar
+        activeView={activeView}
+        setActiveView={setActiveView}
+        apiKeyLoaded={apiKeyLoaded}
         user={user}
         onLogout={handleLogout}
       />
@@ -422,7 +448,7 @@ function AppContent() {
         ) : (
           <>
             {activeView === "dashboard" && (
-              <DashboardView 
+              <DashboardView
                 documents={documents}
                 onSelectDoc={handleSelectDoc}
                 onRefineDoc={handleRefineDoc}
@@ -452,8 +478,19 @@ function AppContent() {
             {activeView === "admin" && <AdminView />}
 
             {activeView === "gaps" && <GapsView />}
+
+            {activeView === "pricing" && <PricingPage />}
           </>
         )}
+
+         <UpgradeModal
+        isOpen={upgradeModal.open}
+        onClose={() => setUpgradeModal(s => ({ ...s, open: false }))}
+        usedCount={upgradeModal.used}
+        limitCount={upgradeModal.limit}
+        reason="quota"
+      />
+      
       </main>
     </div>
   );

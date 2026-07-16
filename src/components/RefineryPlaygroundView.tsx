@@ -800,7 +800,7 @@ export default function RefineryPlaygroundView({
                   1. Sourcing Data Ingestion
                 </span>
                 <span className="text-[9px] uppercase font-bold">
-                  {pipelineStage !== "connect" && pipelineStage !== "idle" ? "✓ Done" : "Processing"}
+                  {pipelineStage !== "connect" ? "✓ Done" : "Processing"}
                 </span>
               </div>
 

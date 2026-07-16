@@ -27,6 +27,7 @@ export interface ReadinessScore {
 }
 
 export interface DocumentRecord {
+  _id?: string;
   id: string;
   name: string;
   type: "PDF" | "DOCX" | "XLSX" | "PPTX" | "TXT";
@@ -47,6 +48,6 @@ export interface DocumentRecord {
   createdAt: string;
 }
 
-export type ActiveView = "dashboard" | "refinery" | "connectors" | "vector" | "analytics" | "admin" | "gaps";
+export type ActiveView = "dashboard" | "refinery" | "connectors" | "vector" | "analytics" | "admin" | "gaps" | "pricing";
 
 export type PipelineStage = "connect" | "parse" | "clean" | "pii" | "meta" | "chunk" | "sync" | "done" | "idle";
